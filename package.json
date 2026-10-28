@@ -1,0 +1,35 @@
+{
+  "name": "answer-paper-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "MCP App: a blank ink answer paper. Questions stay in chat; the sheet is for handwriting.",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "dev": "node scripts/build.mjs && tsx watch src/main.ts",
+    "start": "node dist/index.js",
+    "start:stdio": "node dist/index.js --stdio",
+    "test": "npm run build && node --import tsx --test src/mcp-widgets/grade-client.test.ts src/server.test.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/client": "^2.4.0",
+    "@modelcontextprotocol/express": "^2.0.2",
+    "@modelcontextprotocol/ext-apps": "^2.0.4",
+    "@modelcontextprotocol/node": "^2.1.2",
+    "@modelcontextprotocol/server": "^2.4.0",
+    "cors": "^2.8.6",
+    "express": "^5.3.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.19",
+    "@types/express": "^5.0.6",
+    "@types/node": "^26.6.5",
+    "esbuild": "^0.28.2",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  }
+}
