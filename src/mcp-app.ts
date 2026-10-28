@@ -26,7 +26,9 @@ import {
 const app = new App(
   { name: "Ink Answer Paper", version: "0.1.0" },
   { availableDisplayModes: ["inline", "fullscreen"] },
-  { autoResize: false },
+  // Hosts size the iframe from ui/notifications/size-changed. The sheet's
+  // 720px min-height is what that measurement must include.
+  { autoResize: true },
 );
 
 app.ontoolresult = () => {
