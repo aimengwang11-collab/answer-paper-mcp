@@ -47,13 +47,33 @@ const submitInputSchema = z.object({
   strokes: z.array(strokeSchema).min(1).max(LIMITS.maxStrokes),
 });
 
+/**
+ * Streamable HTTP JSON body cap. The PNG limit is 6_000_000 characters;
+ * the extra room is the stroke list around it.
+ */
+export const MAX_MCP_BODY_BYTES = 10 * 1024 * 1024;
+
 export function distDir(): string {
   const here = path.dirname(fileURLToPath(import.meta.url));
   if (path.basename(here) === "src") return path.join(here, "..", "dist");
   return here;
 }
 
-export function registerTools(server: McpServer, htmlDir: string): void {
+export type CreateServerOptions = {
+  /** Inlined widget HTML. When omitted, the Node server reads `dist/mcp-app.html`. */
+  html?: string;
+  /**
+   * Grade endpoint for this instance. When omitted, `submit_ink_answer`
+   * reads `STUDYWAM_GRADE_URL` from the environment.
+   */
+  gradeUrl?: string;
+};
+
+export function registerTools(
+  server: McpServer,
+  htmlDir?: string,
+  options: Pick<CreateServerOptions, "html" | "gradeUrl"> = {},
+): void {
   registerAppTool(
     server,
     OPEN_TOOL,
@@ -102,7 +122,7 @@ export function registerTools(server: McpServer, htmlDir: string): void {
         },
       },
     },
-    async (args) => submitInk(args),
+    async (args) => submitInk(args, options.gradeUrl),
   );
 
   registerAppResource(
@@ -111,7 +131,7 @@ export function registerTools(server: McpServer, htmlDir: string): void {
     RESOURCE_URI,
     { mimeType: RESOURCE_MIME_TYPE },
     async () => {
-      const html = await fs.readFile(path.join(htmlDir, "mcp-app.html"), "utf-8");
+      const html = options.html ?? (await readDistHtml(htmlDir));
       return {
         contents: [
           {
@@ -128,7 +148,7 @@ export function registerTools(server: McpServer, htmlDir: string): void {
   );
 }
 
-async function submitInk(args: z.infer<typeof submitInputSchema>) {
+async function submitInk(args: z.infer<typeof submitInputSchema>, gradeUrl?: string) {
   const image = normalizePngBase64(args.image);
   if (!image) {
     return {
@@ -153,7 +173,7 @@ async function submitInk(args: z.infer<typeof submitInputSchema>) {
 
   let grade;
   try {
-    grade = await forwardToStudywam(payload);
+    grade = await forwardToStudywam(payload, gradeUrl === undefined ? {} : { url: gradeUrl });
   } catch {
     grade = {
       forwarded: false as const,
@@ -185,11 +205,16 @@ async function submitInk(args: z.infer<typeof submitInputSchema>) {
   };
 }
 
-export function createServer(): McpServer {
+async function readDistHtml(htmlDir?: string): Promise<string> {
+  return fs.readFile(path.join(htmlDir ?? distDir(), "mcp-app.html"), "utf-8");
+}
+
+export function createServer(options: CreateServerOptions = {}): McpServer {
   const server = new McpServer({
     name: "ink-answer-paper",
     version: "0.1.0",
   });
-  registerTools(server, distDir());
+  // Workers bundles have no dist/ on disk. Skip the path lookup when HTML is inlined.
+  registerTools(server, options.html === undefined ? distDir() : undefined, options);
   return server;
 }
