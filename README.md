@@ -34,9 +34,33 @@ The MCP endpoint is `http://localhost:3001/mcp`. `http://localhost:3001/preview`
 
 `PORT` defaults to `3001`.
 
+## Public HTTPS
+
+Claude web and ChatGPT connect to the Cloudflare Worker. [excalidraw-mcp](https://github.com/excalidraw/excalidraw-mcp) deploys to Vercel and has no Workers config, so this uses the same `workers.dev` account as foldscape and studywam. Express stays the local Node process. The Worker (`src/worker.ts`) is a fetch handler around the SDK's web-standard Streamable HTTP transport and the same tools, `ui://` resource, and ink sheet.
+
+| Route | URL |
+| --- | --- |
+| MCP | `https://answer-paper-mcp.aimengwang11.workers.dev/mcp` |
+| Preview | `https://answer-paper-mcp.aimengwang11.workers.dev/preview` |
+| Health | `https://answer-paper-mcp.aimengwang11.workers.dev/health` |
+
+```bash
+npm run deploy
+```
+
+`npm run dev:worker` serves the Worker locally after a build. `npm run build` still writes the Node bundle. The stdio entry is unchanged.
+
+The grade URL is optional. Leave it unset and submit still succeeds. To forward ink, set a Worker secret (the value is not committed):
+
+```bash
+npx wrangler secret put STUDYWAM_GRADE_URL
+```
+
+Local Worker dev reads that name from `.dev.vars`, which is gitignored.
+
 ## Connect a host
 
-Placeholders only. Do not put credentials in these snippets.
+Do not put credentials in these snippets.
 
 Claude Desktop, after `npm run build`:
 
@@ -54,19 +78,42 @@ Claude Desktop, after `npm run build`:
 }
 ```
 
-ChatGPT, Claude web, or another MCP Apps host:
+Claude web, Claude Desktop remote, and ChatGPT (Apps / developer mode) use the public Worker. Paste the URL, or use this connector JSON:
 
 ```json
 {
   "mcpServers": {
     "ink-answer-paper": {
-      "url": "https://YOUR_PUBLIC_HOST/mcp"
+      "type": "http",
+      "url": "https://answer-paper-mcp.aimengwang11.workers.dev/mcp"
     }
   }
 }
 ```
 
-The same server is the shape for ChatGPT Apps, Claude, Grok Bot MCP Apps, and a later studywam client. Hosts that support MCP Apps render `ui://ink-answer-paper/mcp-app.html`.
+Hosts that only accept a URL field can drop `type`:
+
+```json
+{
+  "mcpServers": {
+    "ink-answer-paper": {
+      "url": "https://answer-paper-mcp.aimengwang11.workers.dev/mcp"
+    }
+  }
+}
+```
+
+There is no OAuth on this endpoint. The sheet is the same MCP App as the local server: questions stay in chat, the paper is answers only, and hosts that support MCP Apps render `ui://ink-answer-paper/mcp-app.html`. Grok Bot can keep using `npm run start:stdio`.
+
+## Layout
+
+- `src/main.ts` — local HTTP and stdio entry, from the Excalidraw MCP App server.
+- `src/worker.ts` — Cloudflare Workers fetch entry for the public `/mcp` and `/preview` routes.
+- `src/http.ts` — Streamable HTTP fetch handler shared with the Worker.
+- `src/server.ts` — tool and UI resource registration.
+- `src/mcp-app.html` / `src/mcp-app.ts` — the ink pad. The build inlines the script into `dist/mcp-app.html` and `src/generated/paper-html.ts` (gitignored).
+- `src/mcp-widgets/grade-client.ts` — studywam POST placeholder.
+- `wrangler.jsonc` — Workers config. `STUDYWAM_GRADE_URL` is a secret, not a var in this file.
 
 ## Grade payload
 
@@ -93,9 +140,3 @@ Unset URL: submit still succeeds and says grading is not configured. Set URL: on
 }
 ```
 
-## Layout
-
-- `src/main.ts` — HTTP and stdio entry, from the Excalidraw MCP App server.
-- `src/server.ts` — tool and UI resource registration.
-- `src/mcp-app.html` / `src/mcp-app.ts` — the ink pad. The build inlines the script into `dist/mcp-app.html`.
-- `src/mcp-widgets/grade-client.ts` — studywam POST placeholder.

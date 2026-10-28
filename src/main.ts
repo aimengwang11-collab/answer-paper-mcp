@@ -14,7 +14,7 @@ import cors from "cors";
 import fs from "node:fs/promises";
 import path from "node:path";
 import type { Request, Response } from "express";
-import { createServer, distDir } from "./server.js";
+import { createServer, distDir, MAX_MCP_BODY_BYTES } from "./server.js";
 
 export async function startStreamableHTTPServer(factory: () => McpServer): Promise<void> {
   const port = parseInt(process.env.PORT ?? "3001", 10);
@@ -39,6 +39,7 @@ export async function startStreamableHTTPServer(factory: () => McpServer): Promi
     const server = factory();
     const transport = new NodeStreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
+      maxRequestBodySize: MAX_MCP_BODY_BYTES,
     });
 
     res.on("close", () => {

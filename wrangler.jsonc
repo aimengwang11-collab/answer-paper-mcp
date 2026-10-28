@@ -1,0 +1,23 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "answer-paper-mcp",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-10-28",
+  "account_id": "78afe5560d4b9c1f7cd675e87d94dbad",
+  // Public workers.dev URL, same account as foldscape and studywam. No custom domain.
+  "workers_dev": true,
+  "upload_source_maps": true,
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "enabled": true,
+      "head_sampling_rate": 1
+    },
+    "traces": {
+      "enabled": true,
+      "head_sampling_rate": 1
+    }
+  }
+  // Optional grade hook, not stored in this file:
+  // npx wrangler secret put STUDYWAM_GRADE_URL
+}
