@@ -18,13 +18,12 @@
         color: var(--ink);
       }
       /*
-        Claude measures the app with html { height: max-content } and sizes the
-        artifact iframe to that. A percentage height collapses the sheet to the
-        toolbar. 720px is the writing floor (several exam answers); 100dvh lets
-        a taller host or /preview grow the paper with the frame.
+        Claude sizes the iframe from the document's border box (height: max-content).
+        The scrollable sheet must not be that border box: a definite 720px frame
+        keeps the artifact from collapsing to the toolbar, and the long paper
+        scrolls inside it instead of stretching the iframe without limit.
       */
       body {
-        min-height: 100dvh;
         display: flex;
         flex-direction: column;
         overflow: auto;
@@ -32,6 +31,9 @@
         overscroll-behavior: none;
       }
       header {
+        position: sticky;
+        top: 0;
+        z-index: 2;
         flex: 0 0 auto;
         display: flex;
         flex-wrap: wrap;
@@ -79,26 +81,72 @@
         color: #fff;
         border-color: var(--ink);
       }
+      #frame {
+        display: flex;
+        flex-direction: column;
+        flex: 0 0 auto;
+      }
       #sheet {
-        flex: 1 1 auto;
         height: 720px;
         min-height: 720px;
+        flex: 0 0 auto;
+        overflow-x: hidden;
+        overflow-y: scroll;
+        overscroll-behavior: contain;
         background: #fff;
+        touch-action: none;
       }
-      canvas {
-        display: block;
+      #length {
+        position: relative;
+        width: 100%;
+        height: 1600px;
+        min-height: 1600px;
+      }
+      #tiles {
+        position: absolute;
+        inset: 0;
+      }
+      .tile {
+        position: absolute;
+        left: 0;
+        width: 100%;
+        pointer-events: none;
+      }
+      #paper {
+        position: absolute;
+        inset: 0;
         width: 100%;
         height: 100%;
-        min-height: 720px;
-        background: #fff;
+        background: transparent;
         touch-action: none;
         cursor: crosshair;
         user-select: none;
       }
+      #resize {
+        flex: 0 0 auto;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        height: 36px;
+        border-top: 1px solid var(--line);
+        background: #fafafa;
+        color: var(--muted);
+        font-size: 12px;
+        cursor: ns-resize;
+        touch-action: none;
+        user-select: none;
+      }
+      .grip {
+        width: 36px;
+        height: 4px;
+        border-radius: 999px;
+        background: #c8c8c8;
+      }
     </style>
   </head>
   <body>
-    <header>
+    <header id="header">
       <span class="mark">Answer paper</span>
       <button type="button" id="pen" aria-pressed="true">Pen</button>
       <button type="button" id="eraser" aria-pressed="false">Eraser</button>
@@ -107,8 +155,23 @@
       <span id="status" role="status" aria-live="polite"></span>
       <button type="button" id="submit">Submit</button>
     </header>
-    <div id="sheet">
-      <canvas id="paper" aria-label="Handwriting answer area"></canvas>
+    <div id="frame">
+      <div id="sheet">
+        <div id="length">
+          <div id="tiles"></div>
+          <canvas id="paper" aria-label="Handwriting answer area"></canvas>
+        </div>
+      </div>
+      <div
+        id="resize"
+        role="separator"
+        aria-orientation="horizontal"
+        aria-label="Drag to make the writing area taller"
+        tabindex="0"
+      >
+        <span class="grip" aria-hidden="true"></span>
+        Pull taller
+      </div>
     </div>
     <script type="module" src="./mcp-app.ts"></script>
   </body>

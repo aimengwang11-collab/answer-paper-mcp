@@ -15,7 +15,7 @@
     "dev:worker": "npm run build && wrangler dev",
     "deploy": "npm run build && wrangler deploy",
     "cf-typegen": "wrangler types",
-    "test": "npm run build && node --import tsx --test src/mcp-widgets/grade-client.test.ts src/server.test.ts src/http.test.ts"
+    "test": "npm run build && node --import tsx --test src/mcp-widgets/grade-client.test.ts src/paper-geometry.test.ts src/server.test.ts src/http.test.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/client": "^2.4.0",
