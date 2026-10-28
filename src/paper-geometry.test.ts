@@ -11,7 +11,9 @@ import {
   initialPaperLength,
   inkVerticalSpan,
   nextFrameHeight,
+  revealInk,
   scrollTopForInk,
+  zoomAboutPoint,
 } from "./paper-geometry.js";
 
 test("the sheet starts long enough to scroll and grows near the bottom", () => {
@@ -23,11 +25,23 @@ test("the sheet starts long enough to scroll and grows near the bottom", () => {
   assert.equal(grownLength(MAX_PAPER_PX, MAX_PAPER_PX - 10, MAX_PAPER_PX), MAX_PAPER_PX);
 });
 
-test("scrolling keeps the pen in view and coordinates survive a scrolled sheet", () => {
+test("scrolling keeps the pen in view and coordinates survive scroll and zoom", () => {
   assert.equal(scrollTopForInk(0, 720, 100), 0);
   assert.equal(scrollTopForInk(0, 720, 600), 140);
   const scrolled = clientToPaper(30, 50, { left: 10, top: -400 });
   assert.deepEqual(scrolled, { x: 20, y: 450 });
+  const zoomed = clientToPaper(
+    110,
+    80,
+    { left: 10, top: 20, width: 200, height: 100 },
+    { width: 100, height: 50 },
+  );
+  assert.deepEqual(zoomed, { x: 50, y: 30 });
+  const revealed = revealInk(0, 1, 720, 700);
+  assert.ok(revealed < 0);
+  const zoomedView = zoomAboutPoint(1, 0, 100, 2, 400, 800);
+  assert.equal(zoomedView.zoom, 2);
+  assert.equal(zoomedView.pan + 100 * zoomedView.zoom, 100);
 });
 
 test("the visible frame drags taller without collapsing under 720px", () => {

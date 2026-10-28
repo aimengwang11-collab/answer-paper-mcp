@@ -56,11 +56,13 @@ test("the paper resource is the handwriting widget", async () => {
   assert.match(html ?? "", /id="paper"/);
   assert.match(html ?? "", /Pen/);
   assert.match(html ?? "", /Submit/);
-  assert.match(html ?? "", /min-height:\s*720px/);
-  assert.match(html ?? "", /overflow-y:\s*scroll/);
+  assert.match(html ?? "", /touch-action:\s*none/);
+  assert.match(html ?? "", /overflow:\s*hidden/);
   assert.match(html ?? "", /id="resize"/);
+  assert.match(html ?? "", /id="zoom-in"/);
   assert.match(html ?? "", /Pull taller/);
-  assert.match(html ?? "", /autoResize:\s*!0|autoResize:\s*true/);
+  assert.match(html ?? "", /autoResize:\s*!1|autoResize:\s*false/);
+  assert.match(html ?? "", /["']pen["']/);
   assert.equal(/noteful|excalidraw|question bank/i.test(html ?? ""), false);
 });
 

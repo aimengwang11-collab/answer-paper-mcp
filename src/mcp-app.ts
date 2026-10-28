@@ -10,9 +10,10 @@
  * The PNG is what the agent reads, which is the noteful-mcp page-image idea
  * without Noteful files or branding.
  *
- * The visible frame starts at 720px and can be dragged taller. The sheet
- * inside scrolls, and it grows as ink nears the bottom. Tiles paint only the
- * visible span so the length is not one giant bitmap.
+ * Apple Pencil always draws. The sheet does not use native scrolling, which
+ * WebKit steals from the stylus. Two fingers pinch-zoom and pan. Pull taller
+ * asks the host for a larger frame and, when the iframe will not grow, the
+ * same sheet still zooms and pans inside the space Claude gives.
  */
 
 import type { ContentBlock } from "@modelcontextprotocol/client";
@@ -29,13 +30,15 @@ import {
   FRAME_MIN_PX,
   GROW_MARGIN_PX,
   MAX_PAPER_PX,
+  clampPan,
   clientToPaper,
   exportBitmapSize,
   grownLength,
   initialPaperLength,
   inkVerticalSpan,
   nextFrameHeight,
-  scrollTopForInk,
+  revealInk,
+  zoomAboutPoint,
 } from "./paper-geometry.js";
 
 const TILE_PX = 1200;
@@ -43,9 +46,9 @@ const TILE_PX = 1200;
 const app = new App(
   { name: "Ink Answer Paper", version: "0.1.0" },
   { availableDisplayModes: ["inline", "fullscreen"] },
-  // Hosts size the iframe from ui/notifications/size-changed. That size is the
-  // frame (toolbar + visible sheet + drag handle), not the scrolled length.
-  { autoResize: true },
+  // The sheet fills the iframe. Automatic measurement would report that clamped
+  // height and undo an explicit request for a taller frame.
+  { autoResize: false },
 );
 
 app.ontoolresult = () => {
@@ -69,17 +72,34 @@ const lengthEl = requiredElement<HTMLElement>("length");
 const tilesEl = requiredElement<HTMLElement>("tiles");
 const canvas = requiredElement<HTMLCanvasElement>("paper");
 const resizeHandle = requiredElement<HTMLElement>("resize");
+const zoomOutButton = requiredElement<HTMLButtonElement>("zoom-out");
+const zoomInButton = requiredElement<HTMLButtonElement>("zoom-in");
+const zoomLabel = requiredElement<HTMLElement>("zoom-label");
+
+type PointerSample = { x: number; y: number; type: string };
+type Gesture = {
+  dist: number;
+  zoom: number;
+  panX: number;
+  panY: number;
+  focalX: number;
+  focalY: number;
+};
 
 const strokes: InkStroke[] = [];
 const tiles = new Map<number, HTMLCanvasElement>();
-const pointers = new Map<number, { x: number; y: number }>();
+const pointers = new Map<number, PointerSample>();
 let paperLength = initialPaperLength(FRAME_MIN_PX);
+let zoom = 1;
+let panX = 0;
+let panY = 0;
+let desiredSheetHeight = FRAME_MIN_PX;
 let eraser = false;
 let activePointer: number | null = null;
-let panning = false;
+let gesture: Gesture | null = null;
 let submitting = false;
-let sheetSizedByUser = false;
-let resizeDrag: { y: number; height: number } | null = null;
+let resizeDrag: { y: number; height: number; askedFullscreen: boolean } | null = null;
+let hostReady = false;
 
 penButton.addEventListener("click", () => setEraser(false));
 eraserButton.addEventListener("click", () => setEraser(true));
@@ -94,8 +114,10 @@ clearButton.addEventListener("click", () => {
   if (activePointer !== null) return;
   strokes.length = 0;
   paperLength = initialPaperLength(sheet.clientHeight || FRAME_MIN_PX);
+  panX = 0;
+  panY = 0;
   applyPaperLength();
-  sheet.scrollTop = 0;
+  applyTransform();
   redraw();
   refreshControls();
   status.textContent = "Cleared.";
@@ -104,12 +126,16 @@ submitButton.addEventListener("click", () => {
   void submit();
 });
 
-canvas.addEventListener("pointerdown", onPointerDown);
-canvas.addEventListener("pointermove", onPointerMove);
-canvas.addEventListener("pointerup", onPointerUp);
-canvas.addEventListener("pointercancel", onPointerUp);
-canvas.addEventListener("contextmenu", (event) => event.preventDefault());
-sheet.addEventListener("scroll", () => redraw(), { passive: true });
+sheet.addEventListener("pointerdown", onPointerDown);
+sheet.addEventListener("pointermove", onPointerMove);
+sheet.addEventListener("pointerup", onPointerUp);
+sheet.addEventListener("pointercancel", onPointerUp);
+sheet.addEventListener("contextmenu", (event) => event.preventDefault());
+sheet.addEventListener("touchstart", blockBrowserGesture, { passive: false });
+sheet.addEventListener("touchmove", blockBrowserGesture, { passive: false });
+sheet.addEventListener("wheel", onWheel, { passive: false });
+zoomOutButton.addEventListener("click", () => zoomBy(1 / 1.25));
+zoomInButton.addEventListener("click", () => zoomBy(1.25));
 new ResizeObserver(() => redraw()).observe(sheet);
 
 resizeHandle.addEventListener("pointerdown", onResizeDown);
@@ -119,21 +145,27 @@ resizeHandle.addEventListener("pointercancel", endResize);
 resizeHandle.addEventListener("keydown", (event) => {
   if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
   event.preventDefault();
-  sheetSizedByUser = true;
   const delta = event.key === "ArrowDown" ? 80 : -80;
-  setSheetHeight(nextFrameHeight(sheet.clientHeight, delta));
+  desiredSheetHeight = nextFrameHeight(desiredSheetHeight, delta);
+  publishFrame();
+  void requestTallerHost();
 });
 
 window.addEventListener("resize", () => {
-  fitSheetToViewport();
+  publishFrame();
   redraw();
 });
 
 applyPaperLength();
-fitSheetToViewport();
+applyTransform();
+updateZoomLabel();
 redraw();
 refreshControls();
 requestAnimationFrame(() => redraw());
+void connected.then((ready) => {
+  hostReady = ready;
+  if (ready) publishFrame();
+});
 
 function setEraser(next: boolean): void {
   eraser = next;
@@ -142,40 +174,55 @@ function setEraser(next: boolean): void {
   canvas.style.cursor = next ? "cell" : "crosshair";
 }
 
+function isPen(event: PointerEvent): boolean {
+  return event.pointerType === "pen";
+}
+
+function penIsDown(): boolean {
+  for (const sample of pointers.values()) {
+    if (sample.type === "pen") return true;
+  }
+  return false;
+}
+
 function onPointerDown(event: PointerEvent): void {
-  if (event.button !== 0 && event.button !== 5) return;
-  pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
-  if (pointers.size >= 2) {
-    panning = true;
-    dropActiveStroke();
-    return;
-  }
-  if (activePointer !== null || panning) return;
-  if (strokes.length >= LIMITS.maxStrokes) {
-    status.textContent = "The sheet is full. Clear or submit before adding more ink.";
-    return;
-  }
+  // Apple Pencil tip is pointerType "pen". Safari sometimes reports button -1
+  // for that contact. A second touch must not cancel the stroke.
+  if (!isPen(event) && event.button !== 0 && event.button !== 5) return;
   event.preventDefault();
-  canvas.setPointerCapture(event.pointerId);
-  activePointer = event.pointerId;
-  const useEraser = event.button === 5 || eraser;
-  const stroke: InkStroke = {
-    points: [],
-    width: useEraser ? ERASER_WIDTH : PEN_WIDTH,
-    eraser: useEraser,
-  };
-  pushPoints(stroke, pointsFrom(event));
-  strokes.push(stroke);
-  followInk(stroke);
-  redraw();
-  refreshControls();
+  pointers.set(event.pointerId, {
+    x: event.clientX,
+    y: event.clientY,
+    type: event.pointerType || "touch",
+  });
+  if (isPen(event)) {
+    if (activePointer !== null && pointers.get(activePointer)?.type !== "pen") cancelFingerStroke();
+    beginStroke(event);
+    return;
+  }
+  if (!penIsDown() && pointers.size === 1) {
+    beginStroke(event);
+    return;
+  }
+  if (!penIsDown() && pointers.size >= 2) {
+    cancelFingerStroke();
+    beginGesture();
+  }
 }
 
 function onPointerMove(event: PointerEvent): void {
-  const previous = pointers.get(event.pointerId);
-  pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
-  if (panning && previous) {
-    sheet.scrollTop -= event.clientY - previous.y;
+  if (!pointers.has(event.pointerId)) {
+    if (!isPen(event) || event.buttons === 0) return;
+    onPointerDown(event);
+  }
+  pointers.set(event.pointerId, {
+    x: event.clientX,
+    y: event.clientY,
+    type: event.pointerType || pointers.get(event.pointerId)?.type || "touch",
+  });
+  if (gesture) {
+    event.preventDefault();
+    updateGesture();
     return;
   }
   if (event.pointerId !== activePointer) return;
@@ -188,9 +235,13 @@ function onPointerMove(event: PointerEvent): void {
 }
 
 function onPointerUp(event: PointerEvent): void {
+  const wasDrawing = event.pointerId === activePointer;
   pointers.delete(event.pointerId);
-  if (pointers.size < 2) panning = false;
-  if (event.pointerId !== activePointer) return;
+  if (gesture && pointers.size < 2) gesture = null;
+  if (!wasDrawing) {
+    redraw();
+    return;
+  }
   const stroke = strokes[strokes.length - 1];
   if (stroke) {
     pushPoints(stroke, pointsFrom(event));
@@ -198,19 +249,128 @@ function onPointerUp(event: PointerEvent): void {
   }
   if (stroke && stroke.points.length === 0) strokes.pop();
   activePointer = null;
-  if (canvas.hasPointerCapture(event.pointerId)) {
-    canvas.releasePointerCapture(event.pointerId);
+  try {
+    if (sheet.hasPointerCapture(event.pointerId)) sheet.releasePointerCapture(event.pointerId);
+  } catch {
+    // The pointer may already have been released by the browser.
   }
   redraw();
   refreshControls();
 }
 
-function dropActiveStroke(): void {
-  if (activePointer === null) return;
-  strokes.pop();
-  activePointer = null;
+function beginStroke(event: PointerEvent): void {
+  if (activePointer !== null || gesture) return;
+  if (strokes.length >= LIMITS.maxStrokes) {
+    status.textContent = "The sheet is full. Clear or submit before adding more ink.";
+    return;
+  }
+  try {
+    sheet.setPointerCapture(event.pointerId);
+  } catch {
+    // A synthetic pen move may not be capturable. The stroke still records.
+  }
+  activePointer = event.pointerId;
+  // Pencil button 5 is not the on-screen eraser. The Eraser control is.
+  const useEraser = eraser || (event.button === 5 && !isPen(event));
+  const stroke: InkStroke = {
+    points: [],
+    width: useEraser ? ERASER_WIDTH : PEN_WIDTH,
+    eraser: useEraser,
+  };
+  pushPoints(stroke, pointsFrom(event));
+  strokes.push(stroke);
+  followInk(stroke);
   redraw();
   refreshControls();
+}
+
+function beginGesture(): void {
+  const fingers = [...pointers.values()].filter((sample) => sample.type !== "pen");
+  const first = fingers[0];
+  const second = fingers[1];
+  if (!first || !second) return;
+  const sheetRect = sheet.getBoundingClientRect();
+  gesture = {
+    dist: Math.max(1, Math.hypot(second.x - first.x, second.y - first.y)),
+    zoom,
+    panX,
+    panY,
+    focalX: (first.x + second.x) / 2 - sheetRect.left,
+    focalY: (first.y + second.y) / 2 - sheetRect.top,
+  };
+}
+
+function updateGesture(): void {
+  if (!gesture) return;
+  const fingers = [...pointers.values()].filter((sample) => sample.type !== "pen");
+  const first = fingers[0];
+  const second = fingers[1];
+  if (!first || !second) return;
+  const dist = Math.max(1, Math.hypot(second.x - first.x, second.y - first.y));
+  const sheetRect = sheet.getBoundingClientRect();
+  const focalX = (first.x + second.x) / 2 - sheetRect.left;
+  const focalY = (first.y + second.y) / 2 - sheetRect.top;
+  const factor = dist / gesture.dist;
+  const nextX = zoomAboutPoint(
+    gesture.zoom,
+    gesture.panX,
+    gesture.focalX,
+    factor,
+    sheet.clientWidth,
+    Math.max(1, lengthEl.clientWidth),
+  );
+  const nextY = zoomAboutPoint(
+    gesture.zoom,
+    gesture.panY,
+    gesture.focalY,
+    factor,
+    sheet.clientHeight,
+    paperLength,
+  );
+  zoom = nextY.zoom;
+  panX = clampPan(nextX.pan + (focalX - gesture.focalX), sheet.clientWidth, lengthEl.clientWidth * zoom);
+  panY = clampPan(nextY.pan + (focalY - gesture.focalY), sheet.clientHeight, paperLength * zoom);
+  applyTransform();
+  updateZoomLabel();
+  redraw();
+}
+
+function cancelFingerStroke(): void {
+  if (activePointer === null) return;
+  if (pointers.get(activePointer)?.type === "pen") return;
+  strokes.pop();
+  activePointer = null;
+  refreshControls();
+}
+
+function blockBrowserGesture(event: TouchEvent): void {
+  event.preventDefault();
+}
+
+function onWheel(event: WheelEvent): void {
+  event.preventDefault();
+  if (event.ctrlKey) {
+    zoomBy(Math.exp(-event.deltaY * 0.01), event.clientX, event.clientY);
+    return;
+  }
+  panX = clampPan(panX - event.deltaX, sheet.clientWidth, lengthEl.clientWidth * zoom);
+  panY = clampPan(panY - event.deltaY, sheet.clientHeight, paperLength * zoom);
+  applyTransform();
+  redraw();
+}
+
+function zoomBy(factor: number, clientX?: number, clientY?: number): void {
+  const rect = sheet.getBoundingClientRect();
+  const focalX = (clientX ?? rect.left + rect.width / 2) - rect.left;
+  const focalY = (clientY ?? rect.top + rect.height / 2) - rect.top;
+  const nextX = zoomAboutPoint(zoom, panX, focalX, factor, rect.width, Math.max(1, lengthEl.clientWidth));
+  const nextY = zoomAboutPoint(zoom, panY, focalY, factor, rect.height, paperLength);
+  zoom = nextY.zoom;
+  panX = nextX.pan;
+  panY = nextY.pan;
+  applyTransform();
+  updateZoomLabel();
+  redraw();
 }
 
 function pushPoints(stroke: InkStroke, points: InkPoint[]): boolean {
@@ -233,7 +393,12 @@ function pointsFrom(event: PointerEvent): InkPoint[] {
   const coalesced = typeof event.getCoalescedEvents === "function" ? event.getCoalescedEvents() : [];
   const source = coalesced.length > 0 ? coalesced : [event];
   const rect = lengthEl.getBoundingClientRect();
-  return source.map((item) => clientToPaper(item.clientX, item.clientY, rect));
+  return source.map((item) =>
+    clientToPaper(item.clientX, item.clientY, rect, {
+      width: Math.max(1, lengthEl.offsetWidth),
+      height: paperLength,
+    }),
+  );
 }
 
 function followInk(stroke: InkStroke): void {
@@ -246,8 +411,12 @@ function followInk(stroke: InkStroke): void {
   } else if (last.y > paperLength - GROW_MARGIN_PX && paperLength >= MAX_PAPER_PX) {
     status.textContent = "This sheet is as long as the browser can hold. Submit or clear to continue.";
   }
-  const top = scrollTopForInk(sheet.scrollTop, sheet.clientHeight, last.y);
-  if (top !== sheet.scrollTop) sheet.scrollTop = top;
+  panY = clampPan(
+    revealInk(panY, zoom, sheet.clientHeight, last.y),
+    sheet.clientHeight,
+    paperLength * zoom,
+  );
+  applyTransform();
 }
 
 function applyPaperLength(): void {
@@ -256,29 +425,52 @@ function applyPaperLength(): void {
   lengthEl.style.minHeight = px;
 }
 
-function setSheetHeight(next: number): void {
-  sheet.style.height = `${next}px`;
+function applyTransform(): void {
+  lengthEl.style.transform = `translate(${panX}px, ${panY}px) scale(${zoom})`;
 }
 
-function fitSheetToViewport(): void {
-  if (sheetSizedByUser) return;
-  const available = Math.round(window.innerHeight - header.offsetHeight - resizeHandle.offsetHeight);
-  const next = Math.max(FRAME_MIN_PX, available);
-  if (Math.abs(next - sheet.clientHeight) <= 2) return;
-  setSheetHeight(next);
+function updateZoomLabel(): void {
+  zoomLabel.textContent = `${Math.round(zoom * 100)}%`;
+}
+
+function availableSheetHeight(): number {
+  return Math.max(160, Math.round(window.innerHeight - header.offsetHeight - resizeHandle.offsetHeight));
+}
+
+function publishFrame(): void {
+  desiredSheetHeight = Math.max(desiredSheetHeight, availableSheetHeight());
+  if (!hostReady) return;
+  const height = Math.round(header.offsetHeight + desiredSheetHeight + resizeHandle.offsetHeight);
+  void app.sendSizeChanged({ height }).catch(() => {
+    // /preview has no host listening for the frame size.
+  });
+}
+
+async function requestTallerHost(): Promise<void> {
+  if (window.innerHeight + 8 >= header.offsetHeight + desiredSheetHeight + resizeHandle.offsetHeight) return;
+  try {
+    await app.requestDisplayMode({ mode: "fullscreen" });
+  } catch {
+    // The host can refuse fullscreen. Pinch and the zoom buttons still scale the sheet.
+  }
 }
 
 function onResizeDown(event: PointerEvent): void {
   if (event.button !== 0) return;
-  resizeDrag = { y: event.clientY, height: sheet.clientHeight };
+  resizeDrag = { y: event.clientY, height: desiredSheetHeight, askedFullscreen: false };
   resizeHandle.setPointerCapture(event.pointerId);
   event.preventDefault();
 }
 
 function onResizeMove(event: PointerEvent): void {
   if (!resizeDrag) return;
-  sheetSizedByUser = true;
-  setSheetHeight(nextFrameHeight(resizeDrag.height, event.clientY - resizeDrag.y));
+  const delta = event.clientY - resizeDrag.y;
+  desiredSheetHeight = nextFrameHeight(resizeDrag.height, delta);
+  publishFrame();
+  if (!resizeDrag.askedFullscreen && delta > 24) {
+    resizeDrag.askedFullscreen = true;
+    void requestTallerHost();
+  }
 }
 
 function endResize(): void {
@@ -288,9 +480,9 @@ function endResize(): void {
 function redraw(): void {
   const cssWidth = lengthEl.clientWidth;
   if (cssWidth < 1) return;
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  const viewTop = sheet.scrollTop;
-  const viewBottom = viewTop + sheet.clientHeight;
+  const dpr = Math.min(3, (window.devicePixelRatio || 1) * zoom);
+  const viewTop = -panY / zoom;
+  const viewBottom = viewTop + sheet.clientHeight / zoom;
   const first = Math.max(0, Math.floor((viewTop - TILE_PX) / TILE_PX));
   const last = Math.min(
     Math.ceil(paperLength / TILE_PX) - 1,

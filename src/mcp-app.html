@@ -14,21 +14,24 @@
       html,
       body {
         margin: 0;
+        height: 100%;
         background: #fff;
         color: var(--ink);
+        touch-action: none;
       }
       /*
-        Claude sizes the iframe from the document's border box (height: max-content).
-        The scrollable sheet must not be that border box: a definite 720px frame
-        keeps the artifact from collapsing to the toolbar, and the long paper
-        scrolls inside it instead of stretching the iframe without limit.
+        The sheet fills the iframe Claude actually gives us. Native overflow
+        scrolling steals Apple Pencil on iOS, so pan and pinch are handled here
+        and the host is asked separately for a taller frame.
       */
       body {
         display: flex;
         flex-direction: column;
-        overflow: auto;
+        overflow: hidden;
         font: 14px/1.2 system-ui, sans-serif;
         overscroll-behavior: none;
+        -webkit-user-select: none;
+        user-select: none;
       }
       header {
         position: sticky;
@@ -81,26 +84,35 @@
         color: #fff;
         border-color: var(--ink);
       }
+      #zoom-label {
+        min-width: 3rem;
+        font-size: 12px;
+        color: var(--muted);
+        text-align: center;
+      }
       #frame {
         display: flex;
         flex-direction: column;
-        flex: 0 0 auto;
+        flex: 1 1 auto;
+        min-height: 0;
       }
       #sheet {
-        height: 720px;
-        min-height: 720px;
-        flex: 0 0 auto;
-        overflow-x: hidden;
-        overflow-y: scroll;
-        overscroll-behavior: contain;
+        position: relative;
+        flex: 1 1 auto;
+        min-height: 0;
+        overflow: hidden;
         background: #fff;
         touch-action: none;
       }
       #length {
-        position: relative;
+        position: absolute;
+        left: 0;
+        top: 0;
         width: 100%;
         height: 1600px;
         min-height: 1600px;
+        transform-origin: 0 0;
+        touch-action: none;
       }
       #tiles {
         position: absolute;
@@ -152,6 +164,9 @@
       <button type="button" id="eraser" aria-pressed="false">Eraser</button>
       <button type="button" id="undo">Undo</button>
       <button type="button" id="clear">Clear</button>
+      <button type="button" id="zoom-out" aria-label="Zoom out">−</button>
+      <span id="zoom-label">100%</span>
+      <button type="button" id="zoom-in" aria-label="Zoom in">+</button>
       <span id="status" role="status" aria-live="polite"></span>
       <button type="button" id="submit">Submit</button>
     </header>
