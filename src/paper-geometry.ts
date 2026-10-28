@@ -12,6 +12,8 @@ export const INITIAL_PAPER_PX = 1600;
 export const GROW_MARGIN_PX = 180;
 export const GROW_STEP_PX = 720;
 export const EXPORT_PAD_PX = 32;
+export const ZOOM_MIN = 0.5;
+export const ZOOM_MAX = 4;
 /** Browser-safety ceiling for the scrollable sheet, not a page size. */
 export const MAX_PAPER_PX = 240_000;
 
@@ -54,12 +56,61 @@ export function scrollTopForInk(
 export function clientToPaper(
   clientX: number,
   clientY: number,
-  rect: { left: number; top: number },
+  rect: { left: number; top: number; width?: number; height?: number },
+  paper?: { width: number; height: number },
 ): { x: number; y: number } {
+  const widthScale =
+    paper && rect.width && rect.width > 0 ? paper.width / rect.width : 1;
+  const heightScale =
+    paper && rect.height && rect.height > 0 ? paper.height / rect.height : 1;
   return {
-    x: Math.round((clientX - rect.left) * 100) / 100,
-    y: Math.round((clientY - rect.top) * 100) / 100,
+    x: Math.round((clientX - rect.left) * widthScale * 100) / 100,
+    y: Math.round((clientY - rect.top) * heightScale * 100) / 100,
   };
+}
+
+export function clampZoom(zoom: number): number {
+  if (!Number.isFinite(zoom)) return 1;
+  return Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, zoom));
+}
+
+/** Pan is 0 at the origin and negative once the scaled sheet is larger than the view. */
+export function clampPan(pan: number, view: number, scaledContent: number): number {
+  if (scaledContent <= view) return 0;
+  const min = view - scaledContent;
+  return Math.min(0, Math.max(min, pan));
+}
+
+/** Keep the paper point under `focal` fixed while the zoom changes. */
+export function zoomAboutPoint(
+  zoom: number,
+  pan: number,
+  focal: number,
+  factor: number,
+  view: number,
+  content: number,
+): { zoom: number; pan: number } {
+  const safeZoom = zoom > 0 ? zoom : 1;
+  const nextZoom = clampZoom(safeZoom * factor);
+  const paperPoint = (focal - pan) / safeZoom;
+  const nextPan = clampPan(focal - paperPoint * nextZoom, view, content * nextZoom);
+  return { zoom: nextZoom, pan: nextPan };
+}
+
+/** Move the pan so an ink point stays inside the visible view. */
+export function revealInk(
+  pan: number,
+  zoom: number,
+  view: number,
+  ink: number,
+  margin = GROW_MARGIN_PX,
+): number {
+  const safeZoom = zoom > 0 ? zoom : 1;
+  const screen = pan + ink * safeZoom;
+  const edge = Math.min(margin, Math.max(24, view / 3));
+  if (screen > view - edge) return pan - (screen - (view - edge));
+  if (screen < edge) return pan + (edge - screen);
+  return pan;
 }
 
 export function inkVerticalSpan(
