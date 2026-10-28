@@ -43,6 +43,13 @@ import {
 
 const TILE_PX = 1200;
 
+// Temporary diagnostics: tell the inline diag line that the module is running.
+type Diag = { mod: boolean; host: string };
+const diag = (window as unknown as { __diag?: Diag }).__diag;
+const diagShow = (window as unknown as { __diagShow?: () => void }).__diagShow;
+if (diag) diag.mod = true;
+diagShow?.();
+
 const app = new App(
   { name: "Ink Answer Paper", version: "0.1.0" },
   { availableDisplayModes: ["inline", "fullscreen"] },
@@ -164,6 +171,8 @@ refreshControls();
 requestAnimationFrame(() => redraw());
 void connected.then((ready) => {
   hostReady = ready;
+  if (diag) diag.host = ready ? "ok" : "FAILED";
+  diagShow?.();
   if (ready) publishFrame();
 });
 
