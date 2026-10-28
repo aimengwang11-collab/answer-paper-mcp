@@ -11,7 +11,7 @@
  * without Noteful files or branding.
  *
  * Apple Pencil always draws. The sheet does not use native scrolling, which
- * WebKit steals from the stylus. Two fingers pinch-zoom and pan. Pull taller
+ * WebKit steals from the stylus. One finger pans; two pinch-zoom. Pull taller
  * asks the host for a larger frame and, when the iframe will not grow, the
  * same sheet still zooms and pans inside the space Claude gives.
  */
@@ -31,15 +31,18 @@ import {
   GROW_MARGIN_PX,
   MAX_PAPER_PX,
   clampPan,
-  clientToPaper,
+  paperPointFromView,
+  panZoomFromGesture,
   exportBitmapSize,
   grownLength,
   initialPaperLength,
   inkVerticalSpan,
   nextFrameHeight,
-  revealInk,
+  panAfterInk,
   zoomAboutPoint,
 } from "./paper-geometry.js";
+
+import { PaperInput, type Contact } from "./paper-input.js";
 
 const TILE_PX = 1200;
 
@@ -76,8 +79,8 @@ const zoomOutButton = requiredElement<HTMLButtonElement>("zoom-out");
 const zoomInButton = requiredElement<HTMLButtonElement>("zoom-in");
 const zoomLabel = requiredElement<HTMLElement>("zoom-label");
 
-type PointerSample = { x: number; y: number; type: string };
 type Gesture = {
+  ids: number[];
   dist: number;
   zoom: number;
   panX: number;
@@ -88,14 +91,13 @@ type Gesture = {
 
 const strokes: InkStroke[] = [];
 const tiles = new Map<number, HTMLCanvasElement>();
-const pointers = new Map<number, PointerSample>();
+const input = new PaperInput();
 let paperLength = initialPaperLength(FRAME_MIN_PX);
 let zoom = 1;
 let panX = 0;
 let panY = 0;
 let desiredSheetHeight = FRAME_MIN_PX;
 let eraser = false;
-let activePointer: number | null = null;
 let gesture: Gesture | null = null;
 let submitting = false;
 let resizeDrag: { y: number; height: number; askedFullscreen: boolean } | null = null;
@@ -104,20 +106,21 @@ let hostReady = false;
 penButton.addEventListener("click", () => setEraser(false));
 eraserButton.addEventListener("click", () => setEraser(true));
 undoButton.addEventListener("click", () => {
-  if (activePointer !== null) return;
+  if (input.drawing !== null) return;
   strokes.pop();
   redraw();
   refreshControls();
   status.textContent = strokes.length === 0 ? "Cleared the last mark." : "";
 });
 clearButton.addEventListener("click", () => {
-  if (activePointer !== null) return;
+  if (input.drawing !== null) return;
   strokes.length = 0;
   paperLength = initialPaperLength(sheet.clientHeight || FRAME_MIN_PX);
   panX = 0;
   panY = 0;
   applyPaperLength();
   applyTransform();
+  beginGesture();
   redraw();
   refreshControls();
   status.textContent = "Cleared.";
@@ -129,14 +132,23 @@ submitButton.addEventListener("click", () => {
 sheet.addEventListener("pointerdown", onPointerDown);
 sheet.addEventListener("pointermove", onPointerMove);
 sheet.addEventListener("pointerup", onPointerUp);
-sheet.addEventListener("pointercancel", onPointerUp);
+sheet.addEventListener("pointercancel", (event) => endPointer(event, false));
+sheet.addEventListener("lostpointercapture", (event) => endPointer(event, false));
 sheet.addEventListener("contextmenu", (event) => event.preventDefault());
 sheet.addEventListener("touchstart", blockBrowserGesture, { passive: false });
 sheet.addEventListener("touchmove", blockBrowserGesture, { passive: false });
 sheet.addEventListener("wheel", onWheel, { passive: false });
 zoomOutButton.addEventListener("click", () => zoomBy(1 / 1.25));
 zoomInButton.addEventListener("click", () => zoomBy(1.25));
-new ResizeObserver(() => redraw()).observe(sheet);
+new ResizeObserver(() => {
+  if (!input.drawing) {
+    panX = clampPan(panX, sheet.clientWidth, lengthEl.clientWidth * zoom);
+    panY = clampPan(panY, sheet.clientHeight, paperLength * zoom);
+    applyTransform();
+    beginGesture();
+  }
+  redraw();
+}).observe(sheet);
 
 resizeHandle.addEventListener("pointerdown", onResizeDown);
 resizeHandle.addEventListener("pointermove", onResizeMove);
@@ -174,104 +186,83 @@ function setEraser(next: boolean): void {
   canvas.style.cursor = next ? "cell" : "crosshair";
 }
 
-function isPen(event: PointerEvent): boolean {
-  return event.pointerType === "pen";
-}
-
-function penIsDown(): boolean {
-  for (const sample of pointers.values()) {
-    if (sample.type === "pen") return true;
-  }
-  return false;
+function contactFrom(event: PointerEvent): Contact {
+  return { id: event.pointerId, type: event.pointerType || "mouse", x: event.clientX, y: event.clientY };
 }
 
 function onPointerDown(event: PointerEvent): void {
-  // Apple Pencil tip is pointerType "pen". Safari sometimes reports button -1
-  // for that contact. A second touch must not cancel the stroke.
-  if (!isPen(event) && event.button !== 0 && event.button !== 5) return;
+  if (event.pointerType !== "pen" && event.button !== 0 && event.button !== 5) return;
   event.preventDefault();
-  pointers.set(event.pointerId, {
-    x: event.clientX,
-    y: event.clientY,
-    type: event.pointerType || "touch",
-  });
-  if (isPen(event)) {
-    if (activePointer !== null && pointers.get(activePointer)?.type !== "pen") cancelFingerStroke();
-    beginStroke(event);
-    return;
+  const action = input.down(contactFrom(event));
+  if (action === "ignore") return;
+  try {
+    // Capture fingers too: a pan/pinch must end cleanly outside the sheet.
+    sheet.setPointerCapture(event.pointerId);
+  } catch {
+    // Some hosts do not expose capture; normal events still work on the sheet.
   }
-  if (!penIsDown() && pointers.size === 1) {
+  if (action === "draw") {
+    gesture = null;
     beginStroke(event);
-    return;
-  }
-  if (!penIsDown() && pointers.size >= 2) {
-    cancelFingerStroke();
+  } else {
     beginGesture();
   }
 }
 
 function onPointerMove(event: PointerEvent): void {
-  if (!pointers.has(event.pointerId)) {
-    if (!isPen(event) || event.buttons === 0) return;
-    onPointerDown(event);
-  }
-  pointers.set(event.pointerId, {
-    x: event.clientX,
-    y: event.clientY,
-    type: event.pointerType || pointers.get(event.pointerId)?.type || "touch",
-  });
-  if (gesture) {
-    event.preventDefault();
+  const action = input.move(contactFrom(event));
+  if (action === "ignore") return;
+  event.preventDefault();
+  if (action === "navigate") {
     updateGesture();
     return;
   }
-  if (event.pointerId !== activePointer) return;
   const stroke = strokes[strokes.length - 1];
-  if (!stroke) return;
-  event.preventDefault();
-  if (!pushPoints(stroke, pointsFrom(event))) return;
+  if (!stroke || !pushPoints(stroke, pointsFrom(event))) return;
   followInk(stroke);
-  redraw();
+  scheduleRedraw();
 }
 
 function onPointerUp(event: PointerEvent): void {
-  const wasDrawing = event.pointerId === activePointer;
-  pointers.delete(event.pointerId);
-  if (gesture && pointers.size < 2) gesture = null;
-  if (!wasDrawing) {
-    redraw();
+  endPointer(event, true);
+}
+
+function endPointer(event: PointerEvent, includePoint: boolean): void {
+  const wasDrawing = input.drawing?.id === event.pointerId;
+  const wasTouch = input.touches.has(event.pointerId);
+  if (!wasDrawing && !wasTouch) {
+    input.up(event.pointerId);
     return;
   }
-  const stroke = strokes[strokes.length - 1];
-  if (stroke) {
-    pushPoints(stroke, pointsFrom(event));
-    followInk(stroke);
+  const stroke = wasDrawing ? strokes[strokes.length - 1] : undefined;
+  // Cancel/lost-capture coordinates can be zero or unrelated to the pen tip.
+  if (stroke && includePoint) pushPoints(stroke, pointsFrom(event));
+  if (stroke) followInk(stroke);
+  input.up(event.pointerId);
+  if (wasDrawing && stroke) {
+    const last = stroke.points[stroke.points.length - 1];
+    if (last) {
+      panY = panAfterInk(panY, zoom, sheet.clientHeight, paperLength, last.y);
+      applyTransform();
+    }
   }
-  if (stroke && stroke.points.length === 0) strokes.pop();
-  activePointer = null;
+  if (wasTouch) beginGesture();
   try {
     if (sheet.hasPointerCapture(event.pointerId)) sheet.releasePointerCapture(event.pointerId);
   } catch {
-    // The pointer may already have been released by the browser.
+    // The browser may already have released the pointer.
   }
-  redraw();
+  scheduleRedraw();
   refreshControls();
 }
 
 function beginStroke(event: PointerEvent): void {
-  if (activePointer !== null || gesture) return;
   if (strokes.length >= LIMITS.maxStrokes) {
+    input.up(event.pointerId);
     status.textContent = "The sheet is full. Clear or submit before adding more ink.";
     return;
   }
-  try {
-    sheet.setPointerCapture(event.pointerId);
-  } catch {
-    // A synthetic pen move may not be capturable. The stroke still records.
-  }
-  activePointer = event.pointerId;
-  // Pencil button 5 is not the on-screen eraser. The Eraser control is.
-  const useEraser = eraser || (event.button === 5 && !isPen(event));
+  const useEraser = eraser || (event.button === 5 && event.pointerType !== "pen");
   const stroke: InkStroke = {
     points: [],
     width: useEraser ? ERASER_WIDTH : PEN_WIDTH,
@@ -280,67 +271,50 @@ function beginStroke(event: PointerEvent): void {
   pushPoints(stroke, pointsFrom(event));
   strokes.push(stroke);
   followInk(stroke);
-  redraw();
+  scheduleRedraw();
   refreshControls();
 }
 
 function beginGesture(): void {
-  const fingers = [...pointers.values()].filter((sample) => sample.type !== "pen");
+  const fingers = [...input.touches.values()].slice(0, 2);
   const first = fingers[0];
-  const second = fingers[1];
-  if (!first || !second) return;
-  const sheetRect = sheet.getBoundingClientRect();
+  if (!first) {
+    gesture = null;
+    return;
+  }
+  const second = fingers[1] ?? first;
+  const rect = sheet.getBoundingClientRect();
   gesture = {
+    ids: fingers.map((finger) => finger.id),
     dist: Math.max(1, Math.hypot(second.x - first.x, second.y - first.y)),
-    zoom,
-    panX,
-    panY,
-    focalX: (first.x + second.x) / 2 - sheetRect.left,
-    focalY: (first.y + second.y) / 2 - sheetRect.top,
+    zoom, panX, panY,
+    focalX: (first.x + second.x) / 2 - rect.left,
+    focalY: (first.y + second.y) / 2 - rect.top,
   };
 }
 
 function updateGesture(): void {
-  if (!gesture) return;
-  const fingers = [...pointers.values()].filter((sample) => sample.type !== "pen");
-  const first = fingers[0];
-  const second = fingers[1];
+  if (!gesture || input.drawing) return;
+  const first = input.touches.get(gesture.ids[0]!);
+  const second = input.touches.get(gesture.ids[1]!) ?? first;
   if (!first || !second) return;
   const dist = Math.max(1, Math.hypot(second.x - first.x, second.y - first.y));
-  const sheetRect = sheet.getBoundingClientRect();
-  const focalX = (first.x + second.x) / 2 - sheetRect.left;
-  const focalY = (first.y + second.y) / 2 - sheetRect.top;
-  const factor = dist / gesture.dist;
-  const nextX = zoomAboutPoint(
-    gesture.zoom,
-    gesture.panX,
-    gesture.focalX,
-    factor,
-    sheet.clientWidth,
-    Math.max(1, lengthEl.clientWidth),
-  );
-  const nextY = zoomAboutPoint(
-    gesture.zoom,
-    gesture.panY,
-    gesture.focalY,
-    factor,
-    sheet.clientHeight,
-    paperLength,
-  );
+  const rect = sheet.getBoundingClientRect();
+  const focalX = (first.x + second.x) / 2 - rect.left;
+  const focalY = (first.y + second.y) / 2 - rect.top;
+  const factor = gesture.ids.length === 2 ? dist / gesture.dist : 1;
+  // Translate the focal point before clamping, so a boundary cannot introduce
+  // an extra jump during a pinch that also pans.
+  const nextX = panZoomFromGesture(gesture.zoom, gesture.panX, gesture.focalX,
+    focalX, factor, sheet.clientWidth, lengthEl.clientWidth);
+  const nextY = panZoomFromGesture(gesture.zoom, gesture.panY, gesture.focalY,
+    focalY, factor, sheet.clientHeight, paperLength);
   zoom = nextY.zoom;
-  panX = clampPan(nextX.pan + (focalX - gesture.focalX), sheet.clientWidth, lengthEl.clientWidth * zoom);
-  panY = clampPan(nextY.pan + (focalY - gesture.focalY), sheet.clientHeight, paperLength * zoom);
+  panX = nextX.pan;
+  panY = nextY.pan;
   applyTransform();
   updateZoomLabel();
-  redraw();
-}
-
-function cancelFingerStroke(): void {
-  if (activePointer === null) return;
-  if (pointers.get(activePointer)?.type === "pen") return;
-  strokes.pop();
-  activePointer = null;
-  refreshControls();
+  scheduleRedraw();
 }
 
 function blockBrowserGesture(event: TouchEvent): void {
@@ -349,6 +323,7 @@ function blockBrowserGesture(event: TouchEvent): void {
 
 function onWheel(event: WheelEvent): void {
   event.preventDefault();
+  if (input.drawing) return;
   if (event.ctrlKey) {
     zoomBy(Math.exp(-event.deltaY * 0.01), event.clientX, event.clientY);
     return;
@@ -356,10 +331,12 @@ function onWheel(event: WheelEvent): void {
   panX = clampPan(panX - event.deltaX, sheet.clientWidth, lengthEl.clientWidth * zoom);
   panY = clampPan(panY - event.deltaY, sheet.clientHeight, paperLength * zoom);
   applyTransform();
-  redraw();
+  beginGesture();
+  scheduleRedraw();
 }
 
 function zoomBy(factor: number, clientX?: number, clientY?: number): void {
+  if (input.drawing) return;
   const rect = sheet.getBoundingClientRect();
   const focalX = (clientX ?? rect.left + rect.width / 2) - rect.left;
   const focalY = (clientY ?? rect.top + rect.height / 2) - rect.top;
@@ -370,7 +347,8 @@ function zoomBy(factor: number, clientX?: number, clientY?: number): void {
   panY = nextY.pan;
   applyTransform();
   updateZoomLabel();
-  redraw();
+  beginGesture();
+  scheduleRedraw();
 }
 
 function pushPoints(stroke: InkStroke, points: InkPoint[]): boolean {
@@ -392,13 +370,10 @@ function pushPoints(stroke: InkStroke, points: InkPoint[]): boolean {
 function pointsFrom(event: PointerEvent): InkPoint[] {
   const coalesced = typeof event.getCoalescedEvents === "function" ? event.getCoalescedEvents() : [];
   const source = coalesced.length > 0 ? coalesced : [event];
-  const rect = lengthEl.getBoundingClientRect();
-  return source.map((item) =>
-    clientToPaper(item.clientX, item.clientY, rect, {
-      width: Math.max(1, lengthEl.offsetWidth),
-      height: paperLength,
-    }),
-  );
+  const rect = sheet.getBoundingClientRect();
+  return source.map((item) => paperPointFromView(
+    item.clientX, item.clientY, rect, { zoom, panX, panY },
+  ));
 }
 
 function followInk(stroke: InkStroke): void {
@@ -411,12 +386,7 @@ function followInk(stroke: InkStroke): void {
   } else if (last.y > paperLength - GROW_MARGIN_PX && paperLength >= MAX_PAPER_PX) {
     status.textContent = "This sheet is as long as the browser can hold. Submit or clear to continue.";
   }
-  panY = clampPan(
-    revealInk(panY, zoom, sheet.clientHeight, last.y),
-    sheet.clientHeight,
-    paperLength * zoom,
-  );
-  applyTransform();
+  // Growth never moves the paper under an active tip. Reveal only on lift.
 }
 
 function applyPaperLength(): void {
@@ -475,6 +445,16 @@ function onResizeMove(event: PointerEvent): void {
 
 function endResize(): void {
   resizeDrag = null;
+}
+
+let redrawPending = false;
+function scheduleRedraw(): void {
+  if (redrawPending) return;
+  redrawPending = true;
+  requestAnimationFrame(() => {
+    redrawPending = false;
+    redraw();
+  });
 }
 
 function redraw(): void {
@@ -689,10 +669,12 @@ function textOf(result: { content?: ReadonlyArray<{ type: string; text?: string 
 }
 
 function refreshControls(): void {
-  const busy = submitting || activePointer !== null;
+  const busy = submitting || input.drawing !== null;
   undoButton.disabled = busy || strokes.length === 0;
   clearButton.disabled = busy || strokes.length === 0;
-  submitButton.disabled = submitting;
+  submitButton.disabled = busy;
+  zoomOutButton.disabled = busy;
+  zoomInButton.disabled = busy;
   penButton.disabled = submitting;
   eraserButton.disabled = submitting;
 }

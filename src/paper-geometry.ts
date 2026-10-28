@@ -2,8 +2,8 @@
  * Paper size math shared by the widget.
  *
  * The visible frame is a fixed window the writer can drag taller. The sheet
- * inside that window is a long scrollport that grows as ink nears the bottom.
- * Coordinates stay in that sheet's CSS pixels, including after it scrolls.
+ * inside that window grows as ink nears the bottom. Pan and zoom use a single
+ * transform; input coordinates stay in the unscaled paper's CSS pixels.
  */
 
 export const FRAME_MIN_PX = 720;
@@ -69,6 +69,40 @@ export function clientToPaper(
   };
 }
 
+/** Invert the view transform without measuring the changing paper height. */
+export function paperPointFromView(
+  clientX: number,
+  clientY: number,
+  view: { left: number; top: number },
+  transform: { zoom: number; panX: number; panY: number },
+): { x: number; y: number } {
+  return clientToPaper(clientX, clientY, {
+    left: view.left + transform.panX,
+    top: view.top + transform.panY,
+    width: transform.zoom,
+    height: transform.zoom,
+  }, { width: 1, height: 1 });
+}
+
+/** A pan/pinch uses its starting paper point and the current finger midpoint. */
+export function panZoomFromGesture(
+  zoom: number,
+  pan: number,
+  startFocal: number,
+  focal: number,
+  factor: number,
+  view: number,
+  content: number,
+): { zoom: number; pan: number } {
+  const safeZoom = zoom > 0 ? zoom : 1;
+  const nextZoom = clampZoom(safeZoom * factor);
+  const paperPoint = (startFocal - pan) / safeZoom;
+  return {
+    zoom: nextZoom,
+    pan: clampPan(focal - paperPoint * nextZoom, view, content * nextZoom),
+  };
+}
+
 export function clampZoom(zoom: number): number {
   if (!Number.isFinite(zoom)) return 1;
   return Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, zoom));
@@ -90,11 +124,7 @@ export function zoomAboutPoint(
   view: number,
   content: number,
 ): { zoom: number; pan: number } {
-  const safeZoom = zoom > 0 ? zoom : 1;
-  const nextZoom = clampZoom(safeZoom * factor);
-  const paperPoint = (focal - pan) / safeZoom;
-  const nextPan = clampPan(focal - paperPoint * nextZoom, view, content * nextZoom);
-  return { zoom: nextZoom, pan: nextPan };
+  return panZoomFromGesture(zoom, pan, focal, focal, factor, view, content);
 }
 
 /** Move the pan so an ink point stays inside the visible view. */
@@ -111,6 +141,17 @@ export function revealInk(
   if (screen > view - edge) return pan - (screen - (view - edge));
   if (screen < edge) return pan + (edge - screen);
   return pan;
+}
+
+/** Never shift the coordinate origin under a tip; reveal the next line on lift. */
+export function panAfterInk(
+  pan: number,
+  zoom: number,
+  view: number,
+  paperLength: number,
+  inkY: number,
+): number {
+  return clampPan(revealInk(pan, zoom, view, inkY), view, paperLength * zoom);
 }
 
 export function inkVerticalSpan(
